@@ -1,0 +1,10 @@
+ca: https://acme-staging.api.letsencrypt.org
+account_key: config/account-staging.key
+key_length: 4096
+chain: https://letsencrypt.org/certs/lets-encrypt-x3-cross-signed.pem
+acme_dir: /media/acme-challenge
+certs:
+  - name: example.com
+    domains:
+      - example.com
+      - www.example.com
