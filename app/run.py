@@ -7,6 +7,8 @@ import os
 import subprocess
 import uuid
 import json
+import logging
+import sys
 
 import requests
 import yaml
@@ -61,9 +63,8 @@ def openssl(args, input=None):
     return out
 
 
-
-def do_cert(config, name, domains, link=None):
-    print("Creating certificate", name, "for domains:", ', '.join(domains))
+def make_cert(config, logger, name, domains, link=None):
+    logger.info("Creating certificate {0} for domains: {1}".format(name, ', '.join(domains)))
 
     if len(domains) < 1:
         raise Exception("No domains for certificate")
@@ -71,42 +72,42 @@ def do_cert(config, name, domains, link=None):
     private_key_file = "/tmp/" + uuid.uuid4().hex
     csr_file = "/tmp/" + uuid.uuid4().hex
 
-    print("Generating private key to " + private_key_file + "...")
+    logger.debug("Generating private key to " + private_key_file + "...")
     openssl(["genrsa", "-out", private_key_file, str(config["key_length"])])
 
     with open(private_key_file, 'r') as f:
         private_key = f.read()
 
-    print("Generating CSR to " + csr_file + "...")
+    logger.debug("Generating CSR to " + csr_file + "...")
     if len(domains) == 1:
         openssl(["req", "-new", "-sha256", "-key", private_key_file, "-out", csr_file, "-subj", "/CN=" + domains[0]])
     else:
         csr_config_file = "/tmp/" + uuid.uuid4().hex
-        print("Generating CSR config to " + csr_config_file + "...")
+        logger.debug("Generating CSR config to " + csr_config_file + "...")
         with open("/etc/ssl/openssl.cnf", "r") as f:
             openssl_config = f.read()
         openssl_config += "\n[SAN]\nsubjectAltName=DNS:" + ',DNS:'.join(domains) + "\n"
         with open(csr_config_file, "w") as f:
             f.write(openssl_config)
         openssl(["req", "-new", "-sha256", "-key", private_key_file, "-out", csr_file, "-subj", "/", "-reqexts", "SAN", "-config", csr_config_file])
-        print("Deleting CSR config file...")
+        logger.debug("Deleting CSR config file...")
         os.remove(csr_config_file)
 
-    print("Deleting private key file...")
+    logger.debug("Deleting private key file...")
     os.remove(private_key_file)
 
-    print("Signing CSR using acme_tiny...")
-    cert = acme_tiny.get_crt(config["account_key"], csr_file, config["acme_dir"], CA=config["ca"])
+    logger.info("Signing CSR using acme_tiny...")
+    cert = acme_tiny.get_crt(config["account_key"], csr_file, config["acme_dir"], logger, config["ca"])
 
-    print("Deleting CSR file...")
+    logger.debug("Deleting CSR file...")
     os.remove(csr_file)
 
-    print("Getting chain...")
+    logger.info("Getting chain...")
     chain = get_chain(config)
 
     # TODO: Backup certificate & key ?
 
-    print("Saving cert in Rancher...")
+    logger.info("Saving cert in Rancher...")
     rancher_save_cert(name, private_key, cert, chain, link)
 
 
@@ -131,37 +132,32 @@ def contains_sublist(lst, sublst):
     return True
 
 
-def main():
+def check_certs(config, logger):
     now = datetime.datetime.now()
-    print("*** Rancher Auto Certs started", now.strftime("%Y-%m-%d %H:%M"), "***")
 
-    config = load_config()
-
-    print("Using CA: " + config["ca"])
-    print("Using account key: " + config["account_key"])
-
-    print("Getting certificates from Rancher...")
+    logger.info("Getting certificates from Rancher...")
     rancher_certs = rancher_get_certs()
 
     rancher_certs_by_name = {}
     for cert in rancher_certs:
         rancher_certs_by_name[cert["name"].strip()] = cert
 
-    print("Found certs from Rancher:")
+    # Log which certs are in Rancher and in the config
+    logger.debug("Found certs from Rancher:")
     for cert in rancher_certs:
-        print("- " + cert["name"] + ": " + ', '.join(cert["subjectAlternativeNames"]))
-    print("Found certs from config:")
+        logger.debug("- " + cert["name"] + ": " + ', '.join(cert["subjectAlternativeNames"]))
+    logger.debug("Found certs from config:")
     for cert in config["certs"]:
-        print("- " + cert["name"] + ": " + ', '.join(cert["domains"]))
+        logger.debug("- " + cert["name"] + ": " + ', '.join(cert["domains"]))
 
     to_do = []  # List of (remaining_days, name, domains, link) for certs to make
 
-    print("Checking certs from Rancher:")
+    logger.info("Checking certs:")
     for cert_config in config["certs"]:
         name = cert_config["name"]
         domains = cert_config["domains"]
         if name not in rancher_certs_by_name:
-            print("- Cert " + name + " does not exists")
+            logger.info("- Cert " + name + " does not exists")
             to_do.append((0, name, domains, None))
         else:
             rancher_cert = rancher_certs_by_name[name]
@@ -169,22 +165,52 @@ def main():
             if contains_sublist(rancher_cert["subjectAlternativeNames"], domains):
                 cert_exp = datetime.datetime.strptime(rancher_cert["expiresAt"], "%a %b %d %H:%M:%S %Z %Y")
                 remaining_days = (cert_exp - now).days
-                print("- Cert " + name + " expires in", remaining_days, "days")
+                logger.info("- Cert {0} expires in {1} days".format(name, remaining_days))
                 if remaining_days < 30:
                     to_do.append((remaining_days, name, domains, link))
             else:
-                print("- Cert " + name + " is missing domains")
+                logger.info("- Cert " + name + " is missing domains")
                 to_do.append((0, name, domains, link))
 
     # Renew certs in the order they expire
     to_do.sort()
     for (_, name, domains, link) in to_do:
-        do_cert(config, name, domains, link)
+        make_cert(config, logger, name, domains, link)
 
     # TODO: Update load balancers ?
 
-    print("*** Rancher Auto Certs done", now.strftime("%Y-%m-%d %H:%M"), "***")
+    return len(to_do)
+
+
+def main():
+
+    # Create a logger that sends <= info messages to stdout and >= warning messages to stderr
+    class InfoFilter(logging.Filter):
+        def filter(self, rec):
+            return rec.levelno in (logging.DEBUG, logging.INFO)
+    logger = logging.getLogger(__name__)
+    h1 = logging.StreamHandler(sys.stdout)
+    h1.setLevel(logging.DEBUG)
+    h1.addFilter(InfoFilter())
+    h2 = logging.StreamHandler()
+    h2.setLevel(logging.WARNING)
+    logger.addHandler(h1)
+    logger.addHandler(h2)
+
+    # Configure logger level
+    logger.setLevel(logging.DEBUG if ("LOG_DEBUG" in os.environ) else logging.INFO)
+
+    start_time = datetime.datetime.now()
+    logger.info("*** Rancher Auto Certs started " + start_time.strftime("%Y-%m-%d %H:%M") + " ***")
+
+    config = load_config()
+    logger.debug("Using CA: " + config["ca"])
+    logger.debug("Using account key: " + config["account_key"])
+
+    nb_certs = check_certs(config, logger)  # TODO: Send a mail if sth goes wrong ?
+
+    logger.info("*** {0} cert(s) created in {1} ***".format(nb_certs, datetime.datetime.now() - start_time))
 
 
 if __name__ == '__main__':
-    main()  # TODO: Send a mail if sth goes wrong ?
+    main()
