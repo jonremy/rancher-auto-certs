@@ -8,5 +8,4 @@ ADD app /usr/src/app
 
 WORKDIR /usr/src/app
 VOLUME /usr/src/app/config
-VOLUME /media/acme-challenge
 CMD /usr/src/app/daemon.sh

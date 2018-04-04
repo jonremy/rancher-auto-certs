@@ -1,0 +1,27 @@
+# Docker-compose file for development
+# Prepare the ./devconfig folder:
+# - Copy the example config: cp -r app/config devconfig
+# - Generate an account key: openssl genrsa 4096 > devconfig/account-staging.key
+# Create a docker-compose.override.yml to replace the CATTLE env varibles
+#
+version: '3'
+services:
+  main:
+    image: jremy/rancher-auto-certs:dev
+    build: .
+    volumes:
+      - ./app:/usr/src/app
+      - ./devconfig:/usr/src/app/config
+      - challenge:/media/acme-challenge
+    environment:
+      - CATTLE_URL=https://example.com/v1
+      - CATTLE_ACCESS_KEY=AccessKey
+      - CATTLE_SECRET_KEY=SecretKey
+  webserver:
+    image: nginx
+    volumes:
+      - challenge:/usr/share/nginx/html/.well-known/acme-challenge:ro
+    ports:
+      - 8080:80
+volumes:
+  challenge:
