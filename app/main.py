@@ -233,6 +233,7 @@ def daemon():
                     "{} certificate(s) created or renewed".format(nb_certs),
                     alert_type='success',
                     source_type_name='RancherAutoCerts')
+            datadog.statsd.service_check('rancher_auto_certs.status', datadog.statsd.OK)
         except Exception as e:
             traceback.print_exc()
             datadog.statsd.event(
@@ -240,6 +241,7 @@ def daemon():
                     "Please check container logs.\n{}: {}".format(type(e).__name__, str(e)),
                     alert_type='error',
                     source_type_name='RancherAutoCerts')
+            datadog.statsd.service_check('rancher_auto_certs.status', datadog.statsd.CRITICAL)
         time.sleep(24 * 60 * 60)
 
 
