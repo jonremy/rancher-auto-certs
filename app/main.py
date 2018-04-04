@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 
-# env vars : CATTLE_URL, CATTLE_ACCESS_KEY, CATTLE_SECRET_KEY
-
 import datetime
 import os
 import subprocess
@@ -9,9 +7,12 @@ import uuid
 import json
 import logging
 import sys
+import time
+import traceback
 
 import requests
 import yaml
+import datadog
 
 import libs.acme_tiny as acme_tiny
 
@@ -25,6 +26,10 @@ def get_chain(config):
     return r.text
 
 
+# Rancher env variables:
+# - CATTLE_URL
+# - CATTLE_ACCESS_KEY
+# - CATTLE_SECRET_KEY
 def rancher_get_certs():
     r = requests.get(os.environ['CATTLE_URL'] + "/certificates",
                      auth=(os.environ['CATTLE_ACCESS_KEY'], os.environ['CATTLE_SECRET_KEY']))
@@ -177,13 +182,10 @@ def check_certs(config, logger):
     for (_, name, domains, link) in to_do:
         make_cert(config, logger, name, domains, link)
 
-    # TODO: Update load balancers ?
-
     return len(to_do)
 
 
-def main():
-
+def create_logger():
     # Create a logger that sends <= info messages to stdout and >= warning messages to stderr
     class InfoFilter(logging.Filter):
         def filter(self, rec):
@@ -196,20 +198,56 @@ def main():
     h2.setLevel(logging.WARNING)
     logger.addHandler(h1)
     logger.addHandler(h2)
-
     # Configure logger level
     logger.setLevel(logging.DEBUG if ("LOG_DEBUG" in os.environ) else logging.INFO)
+    return logger
 
+
+def single_run():
+    logger = create_logger()
     start_time = datetime.datetime.now()
+
     logger.info("*** Rancher Auto Certs started " + start_time.strftime("%Y-%m-%d %H:%M") + " ***")
 
     config = load_config()
     logger.debug("Using CA: " + config["ca"])
     logger.debug("Using account key: " + config["account_key"])
 
-    nb_certs = check_certs(config, logger)  # TODO: Send a mail if sth goes wrong ?
+    nb_certs = check_certs(config, logger)
 
     logger.info("*** {0} cert(s) created in {1} ***".format(nb_certs, datetime.datetime.now() - start_time))
+
+    return nb_certs
+
+
+def daemon():
+    datadog.initialize(
+            statsd_host=os.getenv("DOGSTATSD_HOST", "127.0.0.1"),
+            statsd_port=os.getenv("DOGSTATSD_PORT", "8125"))
+
+    while True:
+        try:
+            nb_certs = single_run()
+            datadog.statsd.event(
+                    "Rancher Auto Certs executed successfully",
+                    "{} certificate(s) created or renewed".format(nb_certs),
+                    alert_type='success',
+                    source_type_name='RancherAutoCerts')
+        except Exception as e:
+            traceback.print_exc()
+            datadog.statsd.event(
+                    "Rancher Auto Certs encountered an error",
+                    "Please check container logs.\n{}: {}".format(type(e).__name__, str(e)),
+                    alert_type='error',
+                    source_type_name='RancherAutoCerts')
+        time.sleep(24 * 60 * 60)
+
+
+def main():
+    if "--daemon" in sys.argv:
+        daemon()
+    else:
+        single_run()
 
 
 if __name__ == '__main__':
