@@ -185,8 +185,8 @@ def check_certs(config, logger):
     return len(to_do)
 
 
-def create_logger():
-    # Create a logger that sends <= info messages to stdout and >= warning messages to stderr
+def setup_logging():
+    # Configure the logger to send <= info messages to stdout and >= warning messages to stderr
     class InfoFilter(logging.Filter):
         def filter(self, rec):
             return rec.levelno in (logging.DEBUG, logging.INFO)
@@ -200,11 +200,10 @@ def create_logger():
     logger.addHandler(h2)
     # Configure logger level
     logger.setLevel(logging.DEBUG if ("LOG_DEBUG" in os.environ) else logging.INFO)
-    return logger
 
 
 def single_run():
-    logger = create_logger()
+    logger = logging.getLogger(__name__)
     start_time = datetime.datetime.now()
 
     logger.info("*** Rancher Auto Certs started " + start_time.strftime("%Y-%m-%d %H:%M") + " ***")
@@ -246,6 +245,7 @@ def daemon():
 
 
 def main():
+    setup_logging()
     if "--daemon" in sys.argv:
         daemon()
     else:
