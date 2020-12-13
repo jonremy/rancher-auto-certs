@@ -1,4 +1,4 @@
-FROM python:3.5-alpine
+FROM python:3.7-alpine
 
 RUN apk add --no-cache openssl ca-certificates
 

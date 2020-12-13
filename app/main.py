@@ -17,15 +17,6 @@ import datadog
 import libs.acme_tiny as acme_tiny
 
 
-def get_chain(config):
-    if "chain" not in config:
-        return None
-    r = requests.get(config["chain"])
-    if r.status_code != 200:
-        raise Exception('Unable to get chain cert: ' + str(r.status_code) + ' - ' + r.text)
-    return r.text
-
-
 # Rancher env variables:
 # - CATTLE_URL
 # - CATTLE_ACCESS_KEY
@@ -38,9 +29,9 @@ def rancher_get_certs():
     return r.json()["data"]
 
 
-def rancher_save_cert(name, private_key, cert, chain, link=None):
+def rancher_save_cert(name, private_key, cert, link=None):
 
-    payload = {'key': private_key, 'cert': cert, 'certChain': chain}
+    payload = {'key': private_key, 'cert': cert}
 
     if link is None:  # New certificate
         payload["name"] = name
@@ -59,13 +50,10 @@ def rancher_save_cert(name, private_key, cert, chain, link=None):
 
 def openssl(args, input=None):
     proc = subprocess.Popen(["openssl"] + args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if input is not None:
-        out, err = proc.communicate(input)
-    else:
-        out, err = proc.communicate()
+    stdout, stderr = proc.communicate(input)
     if proc.returncode != 0:
-        raise IOError("OpenSSL Error: {0}".format(err.decode("utf-8")))
-    return out
+        raise IOError("OpenSSL Error: {0}".format(stderr.decode("utf-8")))
+    return stdout
 
 
 def make_cert(config, logger, name, domains, link=None):
@@ -102,24 +90,34 @@ def make_cert(config, logger, name, domains, link=None):
     os.remove(private_key_file)
 
     logger.info("Signing CSR using acme_tiny...")
-    cert = acme_tiny.get_crt(config["account_key"], csr_file, config["acme_dir"], logger, config["ca"])
+    tiny_kwargs = {}
+    if "ca" in config:
+        tiny_kwargs["CA"] = config["ca"]
+    else:
+        tiny_kwargs["directory_url"] = config["ca_directory"]
+    cert = acme_tiny.get_crt(config["account_key"], csr_file, config["acme_dir"], log=logger, **tiny_kwargs)
 
     logger.debug("Deleting CSR file...")
     os.remove(csr_file)
 
-    logger.info("Getting chain...")
-    chain = get_chain(config)
-
     # TODO: Backup certificate & key ?
 
     logger.info("Saving cert in Rancher...")
-    rancher_save_cert(name, private_key, cert, chain, link)
+    rancher_save_cert(name, private_key, cert, link)
 
 
-def load_config():
+def load_config(logger):
 
     with open("config/config.yml", "r") as f:
-        config = yaml.load(f)
+        config = yaml.safe_load(f)
+
+    # Validation
+    if "ca" in config and "ca_directory" in config:
+        raise Exception("The config should have either ca_directory or ca (deprecated) but not both.")
+    if "ca" in config:
+        logger.warning("The config 'ca' is deprecated, please use 'ca_directory' instead.")
+    if "chain" in config:
+        logger.warning("The config 'chain' is not used anymore.")
 
     # Strip cert names and domains
     for cert in config["certs"]:
@@ -208,8 +206,8 @@ def single_run():
 
     logger.info("*** Rancher Auto Certs started " + start_time.strftime("%Y-%m-%d %H:%M") + " ***")
 
-    config = load_config()
-    logger.debug("Using CA: " + config["ca"])
+    config = load_config(logger)
+    logger.debug("Using CA %s and directory %s", config.get("ca"), config.get("ca_directory"))
     logger.debug("Using account key: " + config["account_key"])
 
     nb_certs = check_certs(config, logger)
@@ -222,7 +220,8 @@ def single_run():
 def daemon():
     datadog.initialize(
             statsd_host=os.getenv("DOGSTATSD_HOST", "127.0.0.1"),
-            statsd_port=os.getenv("DOGSTATSD_PORT", "8125"))
+            statsd_port=int(os.getenv("DOGSTATSD_PORT", "8125")),
+    )
 
     while True:
         try:
@@ -231,7 +230,7 @@ def daemon():
                     "Rancher Auto Certs executed successfully",
                     "{} certificate(s) created or renewed".format(nb_certs),
                     alert_type='success',
-                    source_type_name='RancherAutoCerts')
+            )
             datadog.statsd.service_check('rancher_auto_certs.status', datadog.statsd.OK)
         except Exception as e:
             traceback.print_exc()
@@ -239,7 +238,7 @@ def daemon():
                     "Rancher Auto Certs encountered an error",
                     "Please check container logs.\n{}: {}".format(type(e).__name__, str(e)),
                     alert_type='error',
-                    source_type_name='RancherAutoCerts')
+            )
             datadog.statsd.service_check('rancher_auto_certs.status', datadog.statsd.CRITICAL)
         time.sleep(24 * 60 * 60)
 
